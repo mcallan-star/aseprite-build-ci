@@ -240,7 +240,7 @@ jobs:
           || choco install openssl --version=1.1.1.1400 -y -r `
           || choco install openssl11 -y -r
 
-    - name: Debug: Write host listing out what's in OpenSSL paths
+    - name: Debug Write host listing out what's in OpenSSL paths
       shell: pwsh
       run: |
         $roots = @(
