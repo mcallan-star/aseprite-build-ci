@@ -249,7 +249,7 @@ jobs:
         ) | Where-Object { Test-Path $_ }
         
         foreach ($r in $roots) {
-          Write-Host "Contents of $r:"
+          Write-Host "Contents of ${r}:"
           Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
         }
 
