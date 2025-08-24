@@ -416,24 +416,28 @@ jobs:
           throw "Verification failed: DLLs were not copied successfully"
         }
 
-    - name: Package Artifacts
-      shell: bash
+    - name: Package Artifacts (Windows zip via PowerShell)
+      shell: pwsh
       run: |
-        cd aseprite
-        ARTIFACT_DIR="aseprite-windows-${{ env.BUILD_TYPE }}"
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
         
-        # Copy binaries
-        cp -r build/bin "$ARTIFACT_DIR"
+        Push-Location aseprite
+        $artifactDir = "aseprite-windows-${{ env.BUILD_TYPE }}"
         
-        # Create info file
-        cat > "$ARTIFACT_DIR/BUILD_INFO.txt" << EOF
+        if (Test-Path $artifactDir) { Remove-Item $artifactDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $artifactDir | Out-Null
+        
+        Copy-Item -Recurse -Force "build/bin" $artifactDir
+        
+        $buildInfo = @"
         Aseprite Build Information
         ==========================
         Branch: ${{ env.BRANCH }}
         Base Branch: ${{ steps.skia-version.outputs.BASE_BRANCH }}
         Build Type: ${{ env.BUILD_TYPE }}
         Skia Version: ${{ steps.skia-version.outputs.SKIA_TAG }}
-        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Build Date: $(Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
         Commit: $(git rev-parse HEAD)
         
         To run Aseprite:
@@ -442,10 +446,13 @@ jobs:
         
         Note: This is an unofficial build. Consider purchasing Aseprite
         from https://www.aseprite.org/ to support the developers.
-        EOF
+        "@
+        Set-Content -Path (Join-Path $artifactDir "BUILD_INFO.txt") -Value $buildInfo -NoNewline
         
-        # Create ZIP archive (bsdtar supports zip format on Windows)
-        tar -c --format=zip -f aseprite-windows-${{ env.BUILD_TYPE }}.zip "$ARTIFACT_DIR"
+        $zipPath = "aseprite-windows-${{ env.BUILD_TYPE }}.zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Compress-Archive -Path "$artifactDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+        Pop-Location
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
