@@ -230,7 +230,47 @@ jobs:
           echo "ERROR: aseprite.exe not found!"
           ls -la
           exit 1
-        fi
+    
+    - name: Install OpenSSL 1.1.x
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # Prefer an explicit 1.1.x version. Adjust if your org feed has a different last 1.1 build.
+        choco install openssl --version=1.1.1.2000 -y -r `
+          || choco install openssl --version=1.1.1.1400 -y -r `
+          || choco install openssl11 -y -r
+        refreshenv
+
+    - name: Bundle OpenSSL 1.1 DLLs
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dest = "$(Resolve-Path 'aseprite/aseprite-windows-${{ env.BUILD_TYPE }}/bin')"
+
+        $roots = @(
+          "$env:ProgramFiles\OpenSSL-Win64\bin",
+          "$env:ProgramFiles\OpenSSL-v111-Win64\bin",
+          "C:\ProgramData\chocolatey\lib\openssl\tools",
+          "C:\ProgramData\chocolatey\lib\openssl11\tools",
+          "C:\ProgramData\chocolatey\lib\openssl.light\tools"
+        ) | Where-Object { Test-Path $_ }
+
+        if (-not $roots) { throw "OpenSSL install dirs not found." }
+
+        $crypto = $null; $ssl = $null
+        foreach ($r in $roots) {
+          if (-not $crypto) { $crypto = Get-ChildItem $r -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $ssl)    { $ssl    = Get-ChildItem $r -Recurse -Filter 'libssl-1_1-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        }
+
+        if (-not $crypto -or -not $ssl) {
+          throw "Could not find OpenSSL **1.1** DLLs. It looks like only OpenSSL 3.x is installed (which ships libcrypto-3-x64.dll)."
+        }
+
+        Copy-Item $crypto.FullName -Destination $dest -Force
+        Copy-Item $ssl.FullName    -Destination $dest -Force
+        Write-Host "Bundled: $($crypto.FullName) and $($ssl.FullName)"
+
 
     - name: Package Artifacts
       shell: bash
@@ -260,14 +300,14 @@ jobs:
         from https://www.aseprite.org/ to support the developers.
         EOF
         
-        # Create archive
-        tar -czf aseprite-windows-${{ env.BUILD_TYPE }}.tar.gz "$ARTIFACT_DIR"
+        # Create ZIP archive (bsdtar supports zip format on Windows)
+        tar -c --format=zip -f aseprite-windows-${{ env.BUILD_TYPE }}.zip "$ARTIFACT_DIR"
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: aseprite-windows-${{ env.BUILD_TYPE }}-${{ github.run_number }}
-        path: aseprite/aseprite-windows-${{ env.BUILD_TYPE }}.tar.gz
+        path: aseprite/aseprite-windows-${{ env.BUILD_TYPE }}.zip
         retention-days: 30
 
   build-macos:
@@ -394,7 +434,9 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        files: artifacts/**/*.tar.gz
+        files: |
+          artifacts/**/*.tar.gz
+          artifacts/**/*.zip
         draft: false
         prerelease: false
         generate_release_notes: true
