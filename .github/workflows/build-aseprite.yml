@@ -70,28 +70,205 @@ jobs:
           choco install unzip -y
         }
 
-    - name: Install OpenSSL 1.1.x
+    - name: Install OpenSSL 1.1.x to current directory
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # Prefer an explicit 1.1.x version. Adjust if your org feed has a different last 1.1 build.
-        choco install openssl --version=1.1.1.2000 -y -r `
-          || choco install openssl --version=1.1.1.1400 -y -r `
-          || choco install openssl11 -y -r
+        
+        # Get current working directory 
+        $currentDir = (Get-Location).Path
+        $opensslDir = Join-Path $currentDir "OpenSSL-Win64"
+        
+        Write-Host "Installing OpenSSL 1.1.x to: $opensslDir"
+        
+        # Create directory if it doesn't exist
+        New-Item -Path $opensslDir -ItemType Directory -Force | Out-Null
+        
+        # Install OpenSSL with custom directory using install arguments
+        # The /DIR= parameter is passed to the underlying installer
+        try {
+          choco install openssl --version=1.1.1.1400 -y --force --install-arguments="'/DIR=$opensslDir'"
+        } catch {
+          Write-Host "First attempt failed, trying with different approach..."
+          try {
+            choco install openssl11 -y --force --install-arguments="'/DIR=$opensslDir'"
+          } catch {
+            Write-Host "Second attempt failed, trying openssl.light..."
+            choco install openssl.light -y --force --install-arguments="'/DIR=$opensslDir'"
+          }
+        }
+        
+        Write-Host "Installation completed. Checking results..."
+        
+        # Verify installation
+        if (Test-Path $opensslDir) {
+          Write-Host "✓ OpenSSL installed successfully to: $opensslDir"
+          Write-Host "Directory contents:"
+          Get-ChildItem $opensslDir -Recurse | Select-Object -First 20 | ForEach-Object { 
+            Write-Host "  $($_.FullName)" 
+          }
+        } else {
+          Write-Host "✗ Installation may have failed. Searching for OpenSSL..."
+          # Search for any OpenSSL installation
+          $found = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+          if ($found) {
+            Write-Host "Found OpenSSL directories: $($found -join ', ')"
+          }
+        }
 
-    - name: Debug Write host listing out what's in OpenSSL paths
+    - name: Enhanced Debug - Find OpenSSL DLLs
       shell: pwsh
       run: |
-        $roots = @(
-          "C:\Program Files\OpenSSL-Win64\bin",
-          "C:\Program Files\OpenSSL-Win64\"
-        ) | Where-Object { Test-Path $_ }
+        Write-Host "=== Searching for OpenSSL 1.1 DLLs ==="
         
-        Write-Host "Roots to check: $($roots -join ', ')"
+        $currentDir = (Get-Location).Path
+        $searchPaths = @(
+          "$currentDir\OpenSSL-Win64",
+          "$currentDir\OpenSSL-Win64\bin", 
+          "$currentDir\OpenSSL",
+          "$currentDir\OpenSSL\bin"
+        )
         
-        foreach ($r in $roots) {
-          Write-Host "Contents of ${r}:"
-          Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
+        # Add any directories we find that contain OpenSSL
+        $foundDirs = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+        foreach ($dir in $foundDirs) {
+          $fullPath = Join-Path $currentDir $dir
+          $searchPaths += $fullPath
+          $searchPaths += Join-Path $fullPath "bin"
+        }
+        
+        $dlls = @('libcrypto-1_1-x64.dll', 'libssl-1_1-x64.dll')
+        $foundDlls = @{}
+        
+        foreach ($dll in $dlls) {
+          Write-Host "`nSearching for $dll..."
+          foreach ($path in $searchPaths) {
+            if (Test-Path $path) {
+              $found = Get-ChildItem $path -Filter $dll -ErrorAction SilentlyContinue
+              if ($found) {
+                Write-Host "  ✓ Found: $($found.FullName)"
+                $foundDlls[$dll] = $found.FullName
+                break
+              }
+            }
+          }
+          if (-not $foundDlls.ContainsKey($dll)) {
+            Write-Host "  ✗ $dll not found in expected locations"
+          }
+        }
+        
+        # If not found in expected locations, search the entire current directory tree
+        foreach ($dll in $dlls) {
+          if (-not $foundDlls.ContainsKey($dll)) {
+            Write-Host "Performing broader search for $dll..."
+            $found = Get-ChildItem $currentDir -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "  ✓ Found via broad search: $($found.FullName)"
+              $foundDlls[$dll] = $found.FullName
+            }
+          }
+        }
+        
+        Write-Host "`n=== Search Summary ==="
+        foreach ($dll in $dlls) {
+          if ($foundDlls.ContainsKey($dll)) {
+            Write-Host "✓ $dll : $($foundDlls[$dll])"
+          } else {
+            Write-Host "✗ $dll : NOT FOUND"
+          }
+        }
+
+    - name: Bundle OpenSSL 1.1 DLLs (Fixed)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        
+        # Destination = the already-existing build output folder
+        $dest = "$(Resolve-Path 'aseprite/build/bin')"
+        $currentDir = (Get-Location).Path
+        
+        # Search paths in the current directory
+        $searchPaths = @(
+          "$currentDir\OpenSSL-Win64\bin",
+          "$currentDir\OpenSSL-Win64", 
+          "$currentDir\OpenSSL\bin",
+          "$currentDir\OpenSSL"
+        )
+        
+        # Add any OpenSSL directories we can find
+        $opensslDirs = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+        foreach ($dir in $opensslDirs) {
+          $fullPath = Join-Path $currentDir $dir
+          $searchPaths += $fullPath
+          $searchPaths += Join-Path $fullPath "bin"
+        }
+        
+        # Filter to only existing paths
+        $existingPaths = $searchPaths | Where-Object { Test-Path $_ }
+        
+        Write-Host "Searching in paths: $($existingPaths -join ', ')"
+        
+        $crypto = $null
+        $ssl = $null
+        
+        # Search for the DLLs
+        foreach ($path in $existingPaths) {
+          if (-not $crypto) { 
+            $crypto = Get-ChildItem $path -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 
+          }
+          if (-not $ssl) { 
+            $ssl = Get-ChildItem $path -Recurse -Filter 'libssl-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 
+          }
+          
+          # Break early if we found both
+          if ($crypto -and $ssl) { break }
+        }
+        
+        # If still not found, search the entire current directory tree (last resort)
+        if (-not $crypto) {
+          Write-Host "Performing broad search for libcrypto-1_1-x64.dll..."
+          $crypto = Get-ChildItem $currentDir -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if (-not $ssl) {
+          Write-Host "Performing broad search for libssl-1_1-x64.dll..."
+          $ssl = Get-ChildItem $currentDir -Recurse -Filter 'libssl-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        
+        # Check if we found everything
+        if (-not $crypto -or -not $ssl) { 
+          Write-Host "ERROR: Could not find required OpenSSL 1.1 DLLs"
+          Write-Host "Crypto DLL: $(if($crypto) { $crypto.FullName } else { 'NOT FOUND' })"
+          Write-Host "SSL DLL: $(if($ssl) { $ssl.FullName } else { 'NOT FOUND' })"
+          
+          # List all DLLs we can find for debugging
+          Write-Host "`nAll DLLs found in current directory:"
+          Get-ChildItem $currentDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | 
+            Where-Object { $_.Name -like "*ssl*" -or $_.Name -like "*crypto*" } |
+            ForEach-Object { Write-Host "  $($_.FullName)" }
+            
+          throw "Could not find OpenSSL 1.1 DLLs"
+        }
+
+        Write-Host "Found DLLs:"
+        Write-Host "  Crypto: $($crypto.FullName)"
+        Write-Host "  SSL: $($ssl.FullName)"
+
+        # Copy the DLLs
+        Copy-Item $crypto.FullName -Destination $dest -Force
+        Copy-Item $ssl.FullName -Destination $dest -Force
+        
+        Write-Host "✓ Successfully bundled OpenSSL DLLs into $dest"
+        
+        # Verify the files were copied
+        $copiedCrypto = Join-Path $dest $crypto.Name
+        $copiedSsl = Join-Path $dest $ssl.Name
+        
+        if ((Test-Path $copiedCrypto) -and (Test-Path $copiedSsl)) {
+          Write-Host "✓ Verification: DLLs successfully copied to destination"
+          Write-Host "  $copiedCrypto"
+          Write-Host "  $copiedSsl"
+        } else {
+          throw "Verification failed: DLLs were not copied successfully"
         }
 
     - name: Clone Aseprite
