@@ -243,34 +243,28 @@ jobs:
     - name: Bundle OpenSSL 1.1 DLLs
       shell: pwsh
       run: |
-        $ErrorActionPreference = 'Stop'
-        $dest = "$(Resolve-Path 'aseprite/aseprite-windows-${{ env.BUILD_TYPE }}/bin')"
+            $ErrorActionPreference = 'Stop'
+            # Destination = the already-existing build output folder
+            $dest = "$(Resolve-Path 'aseprite/build/bin')"
 
-        $roots = @(
-          "$env:ProgramFiles\OpenSSL-Win64\bin",
-          "$env:ProgramFiles\OpenSSL-v111-Win64\bin",
-          "C:\ProgramData\chocolatey\lib\openssl\tools",
-          "C:\ProgramData\chocolatey\lib\openssl11\tools",
-          "C:\ProgramData\chocolatey\lib\openssl.light\tools"
-        ) | Where-Object { Test-Path $_ }
+            # Where OpenSSL 1.1 was installed
+            $roots = @(
+            "$env:ProgramFiles\OpenSSL-Win64\bin",
+            "C:\ProgramData\chocolatey\lib\openssl\tools",
+            "C:\ProgramData\chocolatey\lib\openssl11\tools",
+            "C:\ProgramData\chocolatey\lib\openssl.light\tools"
+            ) | Where-Object { Test-Path $_ }
 
-        if (-not $roots) { throw "OpenSSL install dirs not found." }
+            $crypto = $null; $ssl = $null
+            foreach ($r in $roots) {
+            if (-not $crypto) { $crypto = Get-ChildItem $r -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+            if (-not $ssl)    { $ssl    = Get-ChildItem $r -Recurse -Filter 'libssl-1_1-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1 }
+            }
+            if (-not $crypto -or -not $ssl) { throw "Could not find OpenSSL 1.1 DLLs" }
 
-        $crypto = $null; $ssl = $null
-        foreach ($r in $roots) {
-          if (-not $crypto) { $crypto = Get-ChildItem $r -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          if (-not $ssl)    { $ssl    = Get-ChildItem $r -Recurse -Filter 'libssl-1_1-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1 }
-        }
-
-        if (-not $crypto -or -not $ssl) {
-          throw "Could not find OpenSSL **1.1** DLLs. It looks like only OpenSSL 3.x is installed (which ships libcrypto-3-x64.dll)."
-        }
-
-        Copy-Item $crypto.FullName -Destination $dest -Force
-        Copy-Item $ssl.FullName    -Destination $dest -Force
-        Write-Host "Bundled: $($crypto.FullName) and $($ssl.FullName)"
-
-
+            Copy-Item $crypto.FullName -Destination $dest -Force
+            Copy-Item $ssl.FullName    -Destination $dest -Force
+            Write-Host "Bundled into $dest"
     - name: Package Artifacts
       shell: bash
       run: |
