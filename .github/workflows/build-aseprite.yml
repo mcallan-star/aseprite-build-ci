@@ -270,115 +270,6 @@ jobs:
         path: aseprite/aseprite-windows-${{ env.BUILD_TYPE }}.tar.gz
         retention-days: 30
 
-  build-linux:
-    name: Build on Linux
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          cmake ninja-build \
-          clang lld libc++-dev libc++abi-dev \
-          libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
-          libgl1-mesa-dev libglu1-mesa-dev \
-          libfontconfig1-dev \
-          curl unzip
-
-    - name: Clone Aseprite
-      run: |
-        git clone --recursive https://github.com/aseprite/aseprite.git
-        cd aseprite
-        
-        if [ "${{ env.BRANCH }}" != "main" ]; then
-          git fetch --all --tags
-          git checkout ${{ env.BRANCH }}
-        fi
-        
-        git submodule update --init --recursive
-
-    - name: Detect Skia Version
-      id: skia-version
-      run: |
-        cd aseprite
-        
-        if [ -f "laf/misc/skia-tag.txt" ]; then
-          SKIA_TAG=$(cat laf/misc/skia-tag.txt)
-        else
-          SKIA_TAG="m124-08a5439a6b"
-        fi
-        
-        SKIA_DIR_NAME="skia-$(echo $SKIA_TAG | cut -d '-' -f 1)"
-        
-        echo "SKIA_TAG=$SKIA_TAG" >> $GITHUB_OUTPUT
-        echo "SKIA_DIR_NAME=$SKIA_DIR_NAME" >> $GITHUB_OUTPUT
-
-    - name: Cache Skia
-      id: cache-skia
-      uses: actions/cache@v4
-      with:
-        path: ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
-        key: skia-${{ steps.skia-version.outputs.SKIA_TAG }}-linux-x64-v3
-
-    - name: Download Skia
-      if: steps.cache-skia.outputs.cache-hit != 'true'
-      run: |
-        cd aseprite
-        
-        mkdir -p ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
-        cd ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
-        
-        # Get the Skia URL
-        if [ -f "$GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh" ]; then
-          SKIA_URL=$(bash $GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh Release)
-        else
-          SKIA_URL="https://github.com/aseprite/skia/releases/download/${{ steps.skia-version.outputs.SKIA_TAG }}/Skia-Linux-Release-x64-libc++.zip"
-        fi
-        
-        echo "Downloading Skia from: $SKIA_URL"
-        curl -L -o skia.zip "$SKIA_URL"
-        unzip -n skia.zip
-        rm skia.zip
-
-    - name: Configure and Build
-      run: |
-        cd aseprite
-        
-        SOURCE_DIR="$PWD"
-        BUILD_DIR="$PWD/build"
-        SKIA_DIR="$HOME/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}"
-        SKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-x64"
-
-        # Use clang toolchain to match Skia libc++
-        export CC=clang
-        export CXX=clang++
-        
-        # Configure
-        cmake -B "$BUILD_DIR" -S "$SOURCE_DIR" -G Ninja \
-              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-              -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
-              -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++" \
-              -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
-              -DLAF_BACKEND=skia \
-              -DSKIA_DIR="$SKIA_DIR" \
-              -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
-        
-        # Build
-        cmake --build "$BUILD_DIR" -- aseprite
-
-    - name: Package and Upload
-      run: |
-        cd aseprite
-        tar -czf aseprite-linux-${{ env.BUILD_TYPE }}.tar.gz build/bin
-        
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: aseprite-linux-${{ env.BUILD_TYPE }}-${{ github.run_number }}
-        path: aseprite/aseprite-linux-${{ env.BUILD_TYPE }}.tar.gz
-        retention-days: 30
-
   build-macos:
     name: Build on macOS
     runs-on: macos-latest
@@ -487,7 +378,7 @@ jobs:
     name: Create Release
     permissions:
       contents: write
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     
@@ -512,7 +403,6 @@ jobs:
           
           This release includes builds for:
           - Windows (x64)
-          - Linux (x64) 
           - macOS (x64/arm64)
           
           ### Installation
