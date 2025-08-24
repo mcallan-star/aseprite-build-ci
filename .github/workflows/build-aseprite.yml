@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+    branches: [ main, master, beta ]
   pull_request:
     branches: [ main, master, beta ]
   workflow_dispatch:
@@ -92,7 +93,7 @@ jobs:
           Write-Host "Contents of ${r}:"
           Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
         }
-          
+
     - name: Clone Aseprite
       shell: bash
       run: |
