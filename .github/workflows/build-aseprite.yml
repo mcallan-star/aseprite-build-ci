@@ -69,6 +69,30 @@ jobs:
           choco install unzip -y
         }
 
+    - name: Install OpenSSL 1.1.x
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # Prefer an explicit 1.1.x version. Adjust if your org feed has a different last 1.1 build.
+        choco install openssl --version=1.1.1.2000 -y -r `
+          || choco install openssl --version=1.1.1.1400 -y -r `
+          || choco install openssl11 -y -r
+
+    - name: Debug Write host listing out what's in OpenSSL paths
+      shell: pwsh
+      run: |
+        $roots = @(
+          "C:\Program Files\OpenSSL-Win64\bin",
+          "C:\Program Files\OpenSSL-Win64\"
+        ) | Where-Object { Test-Path $_ }
+        
+        Write-Host "Roots to check: $($roots -join ', ')"
+        
+        foreach ($r in $roots) {
+          Write-Host "Contents of ${r}:"
+          Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
+        }
+          
     - name: Clone Aseprite
       shell: bash
       run: |
@@ -230,28 +254,6 @@ jobs:
           echo "ERROR: aseprite.exe not found!"
           ls -la
           exit 1
-    
-    - name: Install OpenSSL 1.1.x
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Stop'
-        # Prefer an explicit 1.1.x version. Adjust if your org feed has a different last 1.1 build.
-        choco install openssl --version=1.1.1.2000 -y -r `
-          || choco install openssl --version=1.1.1.1400 -y -r `
-          || choco install openssl11 -y -r
-
-    - name: Debug Write host listing out what's in OpenSSL paths
-      shell: pwsh
-      run: |
-        $roots = @(
-          "C:\Program Files\OpenSSL-Win64\bin",
-          "C:\Program Files\OpenSSL-Win64\"
-        ) | Where-Object { Test-Path $_ }
-        
-        foreach ($r in $roots) {
-          Write-Host "Contents of ${r}:"
-          Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
-        }
 
     - name: Bundle OpenSSL 1.1 DLLs
       shell: pwsh
