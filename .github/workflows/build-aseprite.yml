@@ -281,6 +281,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           cmake ninja-build \
+          clang lld libc++-dev libc++abi-dev \
           libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
           libgl1-mesa-dev libglu1-mesa-dev \
           libfontconfig1-dev \
@@ -349,12 +350,17 @@ jobs:
         BUILD_DIR="$PWD/build"
         SKIA_DIR="$HOME/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}"
         SKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-x64"
+
+        # Use clang toolchain to match Skia libc++
+        export CC=clang
+        export CXX=clang++
         
         # Configure
         cmake -B "$BUILD_DIR" -S "$SOURCE_DIR" -G Ninja \
               -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
               -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
               -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++" \
+              -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
               -DLAF_BACKEND=skia \
               -DSKIA_DIR="$SKIA_DIR" \
               -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
