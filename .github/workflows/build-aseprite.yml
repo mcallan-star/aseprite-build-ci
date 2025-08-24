@@ -2,394 +2,520 @@ name: Build Aseprite
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, beta ]
     tags:
       - 'v*'
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, beta ]
   workflow_dispatch:
     inputs:
-      aseprite_version:
-        description: 'Aseprite version to build (e.g., v1.3.14, main)'
+      branch:
+        description: 'Branch to build (main, beta, or specific version)'
         required: false
         default: 'main'
-      skia_version:
-        description: 'Skia version (e.g., m124-08a5439a6b)'
+      build_type:
+        description: 'Build type'
         required: false
-        default: 'm124-08a5439a6b'
+        default: 'RelWithDebInfo'
+        type: choice
+        options:
+          - RelWithDebInfo
+          - Release
+          - Debug
 
 env:
-  ASEPRITE_VERSION: ${{ github.event.inputs.aseprite_version || 'main' }}
-  SKIA_VERSION: ${{ github.event.inputs.skia_version || 'm124-08a5439a6b' }}
-  CMAKE_BUILD_TYPE: RelWithDebInfo
-
+  BRANCH: ${{ github.event.inputs.branch || 'main' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'RelWithDebInfo' }}
+permissions:
+  contents: write
 jobs:
   build-windows:
-    name: Build Aseprite on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022, windows-2025]  # windows-2025 is beta but available
-        include:
-          - os: windows-2022
-            artifact_name: aseprite-windows-2022
-            vs_version: 2022
-          - os: windows-2025
-            artifact_name: aseprite-windows-2025
-            vs_version: 2022  # VS2022 is installed on both
-
+    name: Build on Windows
+    runs-on: windows-2022
+    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
-
-    - name: Setup MSVC Developer Command Prompt
+    - name: Setup Developer Command Prompt
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-        sdk: 10.0.26100.0  # Windows 11 SDK as required
+        sdk: 10.0.26100.0
 
-    - name: Setup Ninja
-      uses: seanmiddleditch/gha-setup-ninja@master
-
-    - name: Setup Git for Windows SDK paths
+    - name: Install Dependencies
       shell: pwsh
       run: |
-        # Ensure Git Bash tools are in PATH (for build.ps1/build.sh compatibility)
-        if (Test-Path "$env:ProgramFiles\Git\bin") {
-          $env:Path = "$env:ProgramFiles\Git\bin;$env:ProgramFiles\Git\mingw64\bin;" + $env:Path
-          [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Process)
+        # Install Ninja if not available
+        if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+          Write-Host "Installing Ninja..."
+          choco install ninja -y
+          refreshenv
         }
-        Write-Host "PATH updated with Git tools"
+        
+        # Install Git if needed
+        if (-not (Test-Path "$env:ProgramFiles\Git\bin")) {
+          Write-Host "Installing Git..."
+          choco install git -y
+          refreshenv
+        }
+        
+        # Add Git to PATH for bash compatibility
+        $gitPath = "$env:ProgramFiles\Git\bin;$env:ProgramFiles\Git\usr\bin;$env:ProgramFiles\Git\mingw64\bin"
+        $env:Path = "$gitPath;$env:Path"
+        [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Process)
+        
+        # Install curl and unzip if needed
+        if (-not (Get-Command curl -ErrorAction SilentlyContinue)) {
+          choco install curl -y
+        }
+        if (-not (Get-Command unzip -ErrorAction SilentlyContinue)) {
+          choco install unzip -y
+        }
 
-    - name: Cache Skia binaries
+    - name: Clone Aseprite
+      shell: bash
+      run: |
+        git clone --recursive https://github.com/aseprite/aseprite.git
+        cd aseprite
+        
+        # Checkout specific branch if specified
+        if [ "${{ env.BRANCH }}" != "main" ]; then
+          git fetch --all --tags
+          git checkout ${{ env.BRANCH }}
+        fi
+        
+        # Update submodules
+        git submodule update --init --recursive
+
+    - name: Detect Skia Version
+      id: skia-version
+      shell: bash
+      run: |
+        cd aseprite
+        
+        # Get the required Skia tag from laf/misc/skia-tag.txt
+        if [ -f "laf/misc/skia-tag.txt" ]; then
+          SKIA_TAG=$(cat laf/misc/skia-tag.txt)
+          echo "Found Skia tag: $SKIA_TAG"
+        else
+          # Fallback to m124 if file doesn't exist
+          SKIA_TAG="m124-08a5439a6b"
+          echo "Using default Skia tag: $SKIA_TAG"
+        fi
+        
+        # Extract the Skia directory name (e.g., m124 from m124-08a5439a6b)
+        SKIA_DIR_NAME="skia-$(echo $SKIA_TAG | cut -d '-' -f 1)"
+        
+        echo "SKIA_TAG=$SKIA_TAG" >> $GITHUB_OUTPUT
+        echo "SKIA_DIR_NAME=$SKIA_DIR_NAME" >> $GITHUB_OUTPUT
+        
+        # Determine branch type for base branch detection
+        BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+        if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "beta" ]]; then
+          BASE_BRANCH="$BRANCH_NAME"
+        else
+          # Check if this branch is based on beta or main
+          if git branch --contains origin/beta | grep -q "^\* $BRANCH_NAME\$" 2>/dev/null; then
+            BASE_BRANCH="beta"
+          else
+            BASE_BRANCH="main"
+          fi
+        fi
+        echo "BASE_BRANCH=$BASE_BRANCH" >> $GITHUB_OUTPUT
+
+    - name: Cache Skia
       id: cache-skia
       uses: actions/cache@v4
       with:
-        path: deps/skia-m124
-        key: skia-${{ env.SKIA_VERSION }}-windows-x64-v2
+        path: C:/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        key: skia-${{ steps.skia-version.outputs.SKIA_TAG }}-windows-${{ env.BUILD_TYPE }}-v3
 
-    - name: Download Skia binaries
+    - name: Download Skia
       if: steps.cache-skia.outputs.cache-hit != 'true'
-      shell: pwsh
-      run: |
-        Write-Host "Downloading Skia binaries (m124 branch)..."
-        New-Item -ItemType Directory -Force -Path deps
-        Set-Location deps
-        
-        # Download the m124 version of Skia
-        $skiaUrl = "https://github.com/aseprite/skia/releases/download/${{ env.SKIA_VERSION }}/Skia-Windows-Release-x64.zip"
-        Write-Host "Downloading from: $skiaUrl"
-        
-        Invoke-WebRequest -Uri $skiaUrl -OutFile skia.zip -UseBasicParsing
-        
-        # Extract to skia-m124 folder as expected by Aseprite
-        Write-Host "Extracting Skia to skia-m124 folder..."
-        Expand-Archive -Path skia.zip -DestinationPath skia-m124 -Force
-        Remove-Item skia.zip
-        
-        Write-Host "Skia binaries downloaded and extracted"
-        Get-ChildItem -Path skia-m124 -Recurse | Select-Object -First 20
-
-    - name: Clone Aseprite repository
-      shell: pwsh
-      run: |
-        Write-Host "Cloning Aseprite repository..."
-        if (Test-Path aseprite) {
-          Remove-Item -Recurse -Force aseprite
-        }
-        git clone --recursive https://github.com/aseprite/aseprite.git
-        Set-Location aseprite
-        
-        # Checkout specific version if not 'main'
-        if ("${{ env.ASEPRITE_VERSION }}" -ne "main") {
-          git fetch --tags
-          git checkout ${{ env.ASEPRITE_VERSION }}
-        }
-        
-        git submodule update --init --recursive
-        Write-Host "Aseprite repository ready at version: ${{ env.ASEPRITE_VERSION }}"
-
-    - name: Configure Aseprite with CMake
-      shell: cmd
-      run: |
-        echo Configuring Aseprite build...
-        cd aseprite
-        
-        if exist build rmdir /s /q build
-        mkdir build
-        cd build
-        
-        REM Configure with the m124 Skia paths
-        cmake .. ^
-          -G "Ninja" ^
-          -DCMAKE_BUILD_TYPE=%CMAKE_BUILD_TYPE% ^
-          -DLAF_BACKEND=skia ^
-          -DSKIA_DIR=%GITHUB_WORKSPACE%\deps\skia-m124 ^
-          -DSKIA_LIBRARY_DIR=%GITHUB_WORKSPACE%\deps\skia-m124\out\Release-x64 ^
-          -DSKIA_LIBRARY=%GITHUB_WORKSPACE%\deps\skia-m124\out\Release-x64\skia.lib ^
-          -DCMAKE_C_COMPILER=cl ^
-          -DCMAKE_CXX_COMPILER=cl
-
-    - name: Build Aseprite
-      shell: cmd
-      run: |
-        echo Building Aseprite...
-        cd aseprite\build
-        
-        REM Set Ninja status for progress tracking
-        set NINJA_STATUS=[%%f/%%t %%o/sec] 
-        
-        ninja aseprite
-        
-        echo Build completed successfully!
-        dir /s bin
-
-    - name: Test Aseprite executable
-      shell: pwsh
-      continue-on-error: true
-      run: |
-        Write-Host "Testing Aseprite executable..."
-        $exePath = "aseprite\build\bin\aseprite.exe"
-        
-        if (Test-Path $exePath) {
-          Write-Host "Aseprite executable found at: $exePath"
-          # Get file info
-          $fileInfo = Get-Item $exePath
-          Write-Host "File size: $($fileInfo.Length / 1MB) MB"
-          Write-Host "Created: $($fileInfo.CreationTime)"
-          
-          # Try to run with version flag
-          try {
-            & $exePath --version
-          } catch {
-            Write-Host "Could not run version check (may require display)"
-          }
-        } else {
-          Write-Host "ERROR: Aseprite executable not found!"
-          exit 1
-        }
-
-    - name: Package Aseprite binaries
-      shell: pwsh
-      run: |
-        Write-Host "Packaging Aseprite binaries..."
-        
-        $sourceDir = "aseprite\build\bin"
-        $destDir = "aseprite-${{ matrix.os }}-${{ env.ASEPRITE_VERSION }}"
-        
-        if (Test-Path $destDir) {
-          Remove-Item -Recurse -Force $destDir
-        }
-        
-        Copy-Item -Path $sourceDir -Destination $destDir -Recurse
-        
-        # Create a comprehensive README
-        @"
-        Aseprite Build Information
-        ==========================
-        Version: ${{ env.ASEPRITE_VERSION }}
-        Build Type: ${{ env.CMAKE_BUILD_TYPE }}
-        Skia Version: ${{ env.SKIA_VERSION }} (m124 branch)
-        Built on: ${{ matrix.os }}
-        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC" -AsUTC)
-        Commit: $(git -C aseprite rev-parse HEAD)
-        
-        Requirements:
-        - Windows 10/11 x64
-        - Visual C++ Redistributables (usually pre-installed)
-        
-        How to Run:
-        1. Extract all files to a folder
-        2. Run aseprite.exe
-        
-        Note: This is an unofficial build. Consider purchasing Aseprite 
-        from https://www.aseprite.org/ to support the developers.
-        
-        Build Configuration:
-        - Compiler: MSVC (Visual Studio ${{ matrix.vs_version }})
-        - Build System: Ninja
-        - Backend: Skia m124
-        - Architecture: x64
-        "@ | Out-File -FilePath "$destDir\BUILD_INFO.txt" -Encoding UTF8
-        
-        Write-Host "Packaging complete"
-        Get-ChildItem $destDir | Select-Object Name, Length
-
-    - name: Upload Aseprite artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}-${{ env.ASEPRITE_VERSION }}-${{ github.run_number }}
-        path: aseprite-${{ matrix.os }}-${{ env.ASEPRITE_VERSION }}/
-        retention-days: 30
-
-    - name: Compress for Release (if tagged)
-      if: startsWith(github.ref, 'refs/tags/')
-      shell: pwsh
-      run: |
-        Write-Host "Compressing binaries for release..."
-        $zipName = "aseprite-${{ matrix.os }}-${{ env.ASEPRITE_VERSION }}.zip"
-        Compress-Archive -Path "aseprite-${{ matrix.os }}-${{ env.ASEPRITE_VERSION }}\*" -DestinationPath $zipName
-        Write-Host "Created release archive: $zipName"
-
-    - name: Upload Release Assets (if tagged)
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
-      with:
-        files: aseprite-${{ matrix.os }}-${{ env.ASEPRITE_VERSION }}.zip
-        draft: false
-        prerelease: false
-        fail_on_unmatched_files: true
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Alternative build using official build script
-  build-with-script:
-    name: Build with Official Script
-    runs-on: windows-2022
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
-
-    - name: Setup MSVC Developer Command Prompt
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x64
-        sdk: 10.0.26100.0
-
-    - name: Setup build tools
-      shell: pwsh
-      run: |
-        # Install Ninja if not present
-        if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
-          choco install ninja -y
-        }
-        
-        # Ensure Git Bash is in PATH
-        if (Test-Path "$env:ProgramFiles\Git\bin") {
-          $env:Path = "$env:ProgramFiles\Git\bin;$env:ProgramFiles\Git\usr\bin;" + $env:Path
-          [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Process)
-        }
-
-    - name: Clone and build using official script
       shell: bash
       run: |
-        # Clone Aseprite
-        git clone --recursive https://github.com/aseprite/aseprite.git
         cd aseprite
         
-        # Try using the official build script if it exists
-        if [ -f "build.sh" ]; then
-          echo "Using official build.sh script"
-          # The build.sh script should handle Skia download automatically
-          bash build.sh
+        # Create deps directory
+        mkdir -p /c/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        cd /c/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        
+        # Determine which Skia build to download
+        if [[ "${{ env.BUILD_TYPE }}" == "Debug" ]]; then
+          SKIA_BUILD="Debug"
         else
-          echo "build.sh not found, using manual build"
+          SKIA_BUILD="Release"
+        fi
+        
+        # Get the Skia URL using the laf script
+        if [ -f "$GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh" ]; then
+          SKIA_URL=$(bash $GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh $SKIA_BUILD)
+        else
+          # Fallback URL construction if script doesn't exist
+          SKIA_URL="https://github.com/aseprite/skia/releases/download/${{ steps.skia-version.outputs.SKIA_TAG }}/Skia-Windows-${SKIA_BUILD}-x64.zip"
+        fi
+        
+        echo "Downloading Skia from: $SKIA_URL"
+        SKIA_FILE=$(basename $SKIA_URL)
+        
+        # Download Skia
+        curl --ssl-revoke-best-effort -L -o "$SKIA_FILE" "$SKIA_URL"
+        
+        # Extract Skia
+        unzip -n "$SKIA_FILE"
+        
+        # Verify extraction
+        if [[ "${{ env.BUILD_TYPE }}" == "Debug" ]]; then
+          EXPECTED_DIR="out/Debug-x64"
+        else
+          EXPECTED_DIR="out/Release-x64"
+        fi
+        
+        if [ ! -d "$EXPECTED_DIR" ]; then
+          echo "Error: Expected Skia directory $EXPECTED_DIR not found after extraction"
+          ls -la
+          exit 1
+        fi
+        
+        echo "Skia downloaded and extracted successfully"
+
+    - name: Configure with CMake
+      shell: bash
+      run: |
+        cd aseprite
+        
+        # Set up paths
+        SOURCE_DIR="$PWD"
+        BUILD_DIR="$PWD/build"
+        SKIA_DIR="/c/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}"
+        
+        # Determine Skia library directory based on build type
+        if [[ "${{ env.BUILD_TYPE }}" == "Debug" ]]; then
+          SKIA_LIBRARY_DIR="$SKIA_DIR/out/Debug-x64"
+        else
+          SKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-x64"
+        fi
+        
+        echo "======================== CONFIGURATION ========================"
+        echo "Build type: ${{ env.BUILD_TYPE }}"
+        echo "Build dir: $BUILD_DIR"
+        echo "Source dir: $SOURCE_DIR"
+        echo "Skia dir: $SKIA_DIR"
+        echo "Skia library dir: $SKIA_LIBRARY_DIR"
+        echo "Branch: ${{ steps.skia-version.outputs.BASE_BRANCH }}"
+        
+        # Run CMake configuration (following build.sh pattern)
+        cmake -B "$BUILD_DIR" -S "$SOURCE_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+              -DLAF_BACKEND=skia \
+              -DSKIA_DIR="$SKIA_DIR" \
+              -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
+
+    - name: Build Aseprite
+      shell: bash
+      run: |
+        cd aseprite
+        echo "============================== BUILDING =============================="
+        cmake --build build -- aseprite
+
+    - name: Test Build
+      shell: bash
+      continue-on-error: true
+      run: |
+        cd aseprite/build/bin
+        echo "Testing aseprite.exe..."
+        if [ -f "aseprite.exe" ]; then
+          echo "Aseprite executable found"
+          ls -la aseprite.exe
+          # Try to get version (may fail without display)
+          ./aseprite.exe --version || echo "Version check failed (expected without display)"
+        else
+          echo "ERROR: aseprite.exe not found!"
+          ls -la
           exit 1
         fi
 
-    - name: Package and upload
-      shell: pwsh
+    - name: Package Artifacts
+      shell: bash
       run: |
-        $buildDir = Get-ChildItem -Path aseprite -Filter "build*" -Directory | Select-Object -First 1
-        if ($buildDir) {
-          $binPath = Join-Path $buildDir.FullName "bin"
-          if (Test-Path $binPath) {
-            Compress-Archive -Path "$binPath\*" -DestinationPath "aseprite-script-build.zip"
-          }
-        }
+        cd aseprite
+        ARTIFACT_DIR="aseprite-windows-${{ env.BUILD_TYPE }}"
+        
+        # Copy binaries
+        cp -r build/bin "$ARTIFACT_DIR"
+        
+        # Create info file
+        cat > "$ARTIFACT_DIR/BUILD_INFO.txt" << EOF
+        Aseprite Build Information
+        ==========================
+        Branch: ${{ env.BRANCH }}
+        Base Branch: ${{ steps.skia-version.outputs.BASE_BRANCH }}
+        Build Type: ${{ env.BUILD_TYPE }}
+        Skia Version: ${{ steps.skia-version.outputs.SKIA_TAG }}
+        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Commit: $(git rev-parse HEAD)
+        
+        To run Aseprite:
+        1. Extract all files
+        2. Run aseprite.exe
+        
+        Note: This is an unofficial build. Consider purchasing Aseprite
+        from https://www.aseprite.org/ to support the developers.
+        EOF
+        
+        # Create archive
+        tar -czf aseprite-windows-${{ env.BUILD_TYPE }}.tar.gz "$ARTIFACT_DIR"
 
-    - name: Upload script build artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: aseprite-script-build-${{ github.run_number }}
-        path: aseprite-script-build.zip
-        retention-days: 7
+        name: aseprite-windows-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+        path: aseprite/aseprite-windows-${{ env.BUILD_TYPE }}.tar.gz
+        retention-days: 30
 
-  # Build matrix for different configurations
-  build-matrix:
-    name: Build ${{ matrix.build_type }} Configuration
-    runs-on: windows-2022
-    strategy:
-      matrix:
-        build_type: [Release, RelWithDebInfo]
+  build-linux:
+    name: Build on Linux
+    runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup MSVC Developer Command Prompt
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x64
-        sdk: 10.0.26100.0
-
-    - name: Setup Ninja
-      uses: seanmiddleditch/gha-setup-ninja@master
-
-    - name: Cache Skia binaries
-      uses: actions/cache@v4
-      with:
-        path: C:\deps\skia-m124
-        key: skia-m124-windows-x64-${{ env.SKIA_VERSION }}
-
-    - name: Download and Setup Dependencies
-      shell: pwsh
+    - name: Install Dependencies
       run: |
-        # Create deps directory
-        New-Item -ItemType Directory -Force -Path C:\deps
-        
-        # Download Skia if not cached
-        if (-not (Test-Path "C:\deps\skia-m124\out\Release-x64\skia.lib")) {
-          Write-Host "Downloading Skia m124..."
-          Set-Location C:\deps
-          $skiaUrl = "https://github.com/aseprite/skia/releases/download/${{ env.SKIA_VERSION }}/Skia-Windows-Release-x64.zip"
-          Invoke-WebRequest -Uri $skiaUrl -OutFile skia.zip -UseBasicParsing
-          Expand-Archive -Path skia.zip -DestinationPath skia-m124 -Force
-          Remove-Item skia.zip
-        }
-        
-        # Clone Aseprite
-        Set-Location C:\
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake ninja-build \
+          libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+          libgl1-mesa-dev libglu1-mesa-dev \
+          libfontconfig1-dev \
+          curl unzip
+
+    - name: Clone Aseprite
+      run: |
         git clone --recursive https://github.com/aseprite/aseprite.git
-        Set-Location aseprite
+        cd aseprite
         
-        if ("${{ env.ASEPRITE_VERSION }}" -ne "main") {
-          git checkout ${{ env.ASEPRITE_VERSION }}
-        }
+        if [ "${{ env.BRANCH }}" != "main" ]; then
+          git fetch --all --tags
+          git checkout ${{ env.BRANCH }}
+        fi
+        
         git submodule update --init --recursive
 
-    - name: Configure and Build
-      shell: cmd
+    - name: Detect Skia Version
+      id: skia-version
       run: |
-        cd C:\aseprite
-        mkdir build
-        cd build
+        cd aseprite
         
-        cmake .. ^
-          -G "Ninja" ^
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ^
-          -DLAF_BACKEND=skia ^
-          -DSKIA_DIR=C:\deps\skia-m124 ^
-          -DSKIA_LIBRARY_DIR=C:\deps\skia-m124\out\Release-x64 ^
-          -DSKIA_LIBRARY=C:\deps\skia-m124\out\Release-x64\skia.lib
+        if [ -f "laf/misc/skia-tag.txt" ]; then
+          SKIA_TAG=$(cat laf/misc/skia-tag.txt)
+        else
+          SKIA_TAG="m124-08a5439a6b"
+        fi
         
-        ninja aseprite
+        SKIA_DIR_NAME="skia-$(echo $SKIA_TAG | cut -d '-' -f 1)"
+        
+        echo "SKIA_TAG=$SKIA_TAG" >> $GITHUB_OUTPUT
+        echo "SKIA_DIR_NAME=$SKIA_DIR_NAME" >> $GITHUB_OUTPUT
 
-    - name: Upload artifacts
+    - name: Cache Skia
+      id: cache-skia
+      uses: actions/cache@v4
+      with:
+        path: ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        key: skia-${{ steps.skia-version.outputs.SKIA_TAG }}-linux-x64-v3
+
+    - name: Download Skia
+      if: steps.cache-skia.outputs.cache-hit != 'true'
+      run: |
+        cd aseprite
+        
+        mkdir -p ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        cd ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        
+        # Get the Skia URL
+        if [ -f "$GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh" ]; then
+          SKIA_URL=$(bash $GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh Release)
+        else
+          SKIA_URL="https://github.com/aseprite/skia/releases/download/${{ steps.skia-version.outputs.SKIA_TAG }}/Skia-Linux-Release-x64-libc++.zip"
+        fi
+        
+        echo "Downloading Skia from: $SKIA_URL"
+        curl -L -o skia.zip "$SKIA_URL"
+        unzip -n skia.zip
+        rm skia.zip
+
+    - name: Configure and Build
+      run: |
+        cd aseprite
+        
+        SOURCE_DIR="$PWD"
+        BUILD_DIR="$PWD/build"
+        SKIA_DIR="$HOME/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}"
+        SKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-x64"
+        
+        # Configure
+        cmake -B "$BUILD_DIR" -S "$SOURCE_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+              -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+              -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++" \
+              -DLAF_BACKEND=skia \
+              -DSKIA_DIR="$SKIA_DIR" \
+              -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
+        
+        # Build
+        cmake --build "$BUILD_DIR" -- aseprite
+
+    - name: Package and Upload
+      run: |
+        cd aseprite
+        tar -czf aseprite-linux-${{ env.BUILD_TYPE }}.tar.gz build/bin
+        
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: aseprite-${{ matrix.build_type }}-${{ github.run_number }}
-        path: C:\aseprite\build\bin\
-        retention-days: 7
+        name: aseprite-linux-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+        path: aseprite/aseprite-linux-${{ env.BUILD_TYPE }}.tar.gz
+        retention-days: 30
+
+  build-macos:
+    name: Build on macOS
+    runs-on: macos-latest
+    
+    steps:
+    - name: Install Dependencies
+      run: |
+        brew install cmake ninja
+
+    - name: Clone Aseprite
+      run: |
+        git clone --recursive https://github.com/aseprite/aseprite.git
+        cd aseprite
+        
+        if [ "${{ env.BRANCH }}" != "main" ]; then
+          git fetch --all --tags
+          git checkout ${{ env.BRANCH }}
+        fi
+        
+        git submodule update --init --recursive
+
+    - name: Detect Skia Version
+      id: skia-version
+      run: |
+        cd aseprite
+        
+        if [ -f "laf/misc/skia-tag.txt" ]; then
+          SKIA_TAG=$(cat laf/misc/skia-tag.txt)
+        else
+          SKIA_TAG="m124-08a5439a6b"
+        fi
+        
+        SKIA_DIR_NAME="skia-$(echo $SKIA_TAG | cut -d '-' -f 1)"
+        
+        # Detect architecture
+        if [[ $(uname -m) == "arm64" ]]; then
+          ARCH="arm64"
+        else
+          ARCH="x64"
+        fi
+        
+        echo "SKIA_TAG=$SKIA_TAG" >> $GITHUB_OUTPUT
+        echo "SKIA_DIR_NAME=$SKIA_DIR_NAME" >> $GITHUB_OUTPUT
+        echo "ARCH=$ARCH" >> $GITHUB_OUTPUT
+
+    - name: Cache Skia
+      id: cache-skia
+      uses: actions/cache@v4
+      with:
+        path: ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        key: skia-${{ steps.skia-version.outputs.SKIA_TAG }}-macos-${{ steps.skia-version.outputs.ARCH }}-v3
+
+    - name: Download Skia
+      if: steps.cache-skia.outputs.cache-hit != 'true'
+      run: |
+        cd aseprite
+        
+        mkdir -p ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        cd ~/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}
+        
+        # Get the Skia URL
+        if [ -f "$GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh" ]; then
+          SKIA_URL=$(bash $GITHUB_WORKSPACE/aseprite/laf/misc/skia-url.sh Release)
+        else
+          SKIA_URL="https://github.com/aseprite/skia/releases/download/${{ steps.skia-version.outputs.SKIA_TAG }}/Skia-macOS-Release-${{ steps.skia-version.outputs.ARCH }}.zip"
+        fi
+        
+        echo "Downloading Skia from: $SKIA_URL"
+        curl -L -o skia.zip "$SKIA_URL"
+        unzip -n skia.zip
+        rm skia.zip
+
+    - name: Configure and Build
+      run: |
+        cd aseprite
+        
+        SOURCE_DIR="$PWD"
+        BUILD_DIR="$PWD/build"
+        SKIA_DIR="$HOME/deps/${{ steps.skia-version.outputs.SKIA_DIR_NAME }}"
+        SKIA_LIBRARY_DIR="$SKIA_DIR/out/Release-${{ steps.skia-version.outputs.ARCH }}"
+        
+        # Configure with macOS deployment target
+        cmake -B "$BUILD_DIR" -S "$SOURCE_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+              -DLAF_BACKEND=skia \
+              -DSKIA_DIR="$SKIA_DIR" \
+              -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
+        
+        # Build
+        cmake --build "$BUILD_DIR" -- aseprite
+
+    - name: Package and Upload
+      run: |
+        cd aseprite
+        tar -czf aseprite-macos-${{ env.BUILD_TYPE }}.tar.gz build/bin
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-macos-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+        path: aseprite/aseprite-macos-${{ env.BUILD_TYPE }}.tar.gz
+        retention-days: 30
+
+  release:
+    name: Create Release
+    permissions:
+      contents: write
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Display structure
+      run: ls -R artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: artifacts/**/*.tar.gz
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        body: |
+          ## Aseprite Build
+          
+          This release includes builds for:
+          - Windows (x64)
+          - Linux (x64) 
+          - macOS (x64/arm64)
+          
+          ### Installation
+          1. Download the appropriate archive for your platform
+          2. Extract all files to a folder
+          3. Run the aseprite executable
+          
+          ### Note
+          These are unofficial builds. Please consider purchasing Aseprite from https://www.aseprite.org/ to support the developers.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
