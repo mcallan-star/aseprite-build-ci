@@ -240,6 +240,19 @@ jobs:
           || choco install openssl --version=1.1.1.1400 -y -r `
           || choco install openssl11 -y -r
 
+    - name: Debug: Write host listing out what's in OpenSSL paths
+      shell: pwsh
+      run: |
+        $roots = @(
+          "C:\Program Files\OpenSSL-Win64\bin",
+          "C:\Program Files\OpenSSL-Win64\"
+        ) | Where-Object { Test-Path $_ }
+        
+        foreach ($r in $roots) {
+          Write-Host "Contents of $r:"
+          Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
+        }
+
     - name: Bundle OpenSSL 1.1 DLLs
       shell: pwsh
       run: |
@@ -249,10 +262,8 @@ jobs:
 
             # Where OpenSSL 1.1 was installed
             $roots = @(
-            "$env:ProgramFiles\OpenSSL-Win64\bin",
-            "C:\ProgramData\chocolatey\lib\openssl\tools",
-            "C:\ProgramData\chocolatey\lib\openssl11\tools",
-            "C:\ProgramData\chocolatey\lib\openssl.light\tools"
+            "C:\Program Files\OpenSSL-Win64\bin",
+            "C:\Program Files\OpenSSL-Win64\"
             ) | Where-Object { Test-Path $_ }
 
             $crypto = $null; $ssl = $null
