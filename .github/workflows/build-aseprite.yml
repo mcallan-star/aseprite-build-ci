@@ -215,85 +215,229 @@ jobs:
         echo "============================== BUILDING =============================="
         cmake --build build -- aseprite
 
-    - name: Test Build
-      shell: bash
-      continue-on-error: true
-      run: |
-        cd aseprite/build/bin
-        echo "Testing aseprite.exe..."
-        if [ -f "aseprite.exe" ]; then
-          echo "Aseprite executable found"
-          ls -la aseprite.exe
-          # Try to get version (may fail without display)
-          ./aseprite.exe --version || echo "Version check failed (expected without display)"
-        else
-          echo "ERROR: aseprite.exe not found!"
-          ls -la
-          exit 1
-    
-    - name: Install OpenSSL 1.1.x
+    - name: Install OpenSSL 1.1.x to current directory
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # Prefer an explicit 1.1.x version. Adjust if your org feed has a different last 1.1 build.
-        choco install openssl --version=1.1.1.2000 -y -r `
-          || choco install openssl --version=1.1.1.1400 -y -r `
-          || choco install openssl11 -y -r
-
-    - name: Debug Write host listing out what's in OpenSSL paths
-      shell: pwsh
-      run: |
-        $roots = @(
-          "C:\Program Files\OpenSSL-Win64\bin",
-          "C:\Program Files\OpenSSL-Win64\"
-        ) | Where-Object { Test-Path $_ }
         
-        foreach ($r in $roots) {
-          Write-Host "Contents of $r:"
-          Get-ChildItem $r -Recurse | ForEach-Object { Write-Host $_.FullName }
+        # Get current working directory 
+        $currentDir = (Get-Location).Path
+        $opensslDir = Join-Path $currentDir "OpenSSL-Win64"
+        
+        Write-Host "Installing OpenSSL 1.1.x to: $opensslDir"
+        
+        # Create directory if it doesn't exist
+        New-Item -Path $opensslDir -ItemType Directory -Force | Out-Null
+        
+        # Install OpenSSL with custom directory using install arguments
+        # The /DIR= parameter is passed to the underlying installer
+        try {
+          choco install openssl --version=1.1.1.1400 -y --force --install-arguments="'/DIR=$opensslDir'"
+        } catch {
+          Write-Host "First attempt failed, trying with different approach..."
+          try {
+            choco install openssl11 -y --force --install-arguments="'/DIR=$opensslDir'"
+          } catch {
+            Write-Host "Second attempt failed, trying openssl.light..."
+            choco install openssl.light -y --force --install-arguments="'/DIR=$opensslDir'"
+          }
+        }
+        
+        Write-Host "Installation completed. Checking results..."
+        
+        # Verify installation
+        if (Test-Path $opensslDir) {
+          Write-Host "✓ OpenSSL installed successfully to: $opensslDir"
+          Write-Host "Directory contents:"
+          Get-ChildItem $opensslDir -Recurse | Select-Object -First 20 | ForEach-Object { 
+            Write-Host "  $($_.FullName)" 
+          }
+        } else {
+          Write-Host "✗ Installation may have failed. Searching for OpenSSL..."
+          # Search for any OpenSSL installation
+          $found = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+          if ($found) {
+            Write-Host "Found OpenSSL directories: $($found -join ', ')"
+          }
         }
 
-    - name: Bundle OpenSSL 1.1 DLLs
+    - name: Enhanced Debug - Find OpenSSL DLLs
       shell: pwsh
       run: |
-            $ErrorActionPreference = 'Stop'
-            # Destination = the already-existing build output folder
-            $dest = "$(Resolve-Path 'aseprite/build/bin')"
-
-            # Where OpenSSL 1.1 was installed
-            $roots = @(
-            "C:\Program Files\OpenSSL-Win64\bin",
-            "C:\Program Files\OpenSSL-Win64\"
-            ) | Where-Object { Test-Path $_ }
-
-            $crypto = $null; $ssl = $null
-            foreach ($r in $roots) {
-            if (-not $crypto) { $crypto = Get-ChildItem $r -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 }
-            if (-not $ssl)    { $ssl    = Get-ChildItem $r -Recurse -Filter 'libssl-1_1-x64.dll'    -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        Write-Host "=== Searching for OpenSSL 1.1 DLLs ==="
+        
+        $currentDir = (Get-Location).Path
+        $searchPaths = @(
+          "$currentDir\OpenSSL-Win64",
+          "$currentDir\OpenSSL-Win64\bin", 
+          "$currentDir\OpenSSL",
+          "$currentDir\OpenSSL\bin"
+        )
+        
+        # Add any directories we find that contain OpenSSL
+        $foundDirs = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+        foreach ($dir in $foundDirs) {
+          $fullPath = Join-Path $currentDir $dir
+          $searchPaths += $fullPath
+          $searchPaths += Join-Path $fullPath "bin"
+        }
+        
+        $dlls = @('libcrypto-1_1-x64.dll', 'libssl-1_1-x64.dll')
+        $foundDlls = @{}
+        
+        foreach ($dll in $dlls) {
+          Write-Host "`nSearching for $dll..."
+          foreach ($path in $searchPaths) {
+            if (Test-Path $path) {
+              $found = Get-ChildItem $path -Filter $dll -ErrorAction SilentlyContinue
+              if ($found) {
+                Write-Host "  ✓ Found: $($found.FullName)"
+                $foundDlls[$dll] = $found.FullName
+                break
+              }
             }
-            if (-not $crypto -or -not $ssl) { throw "Could not find OpenSSL 1.1 DLLs" }
+          }
+          if (-not $foundDlls.ContainsKey($dll)) {
+            Write-Host "  ✗ $dll not found in expected locations"
+          }
+        }
+        
+        # If not found in expected locations, search the entire current directory tree
+        foreach ($dll in $dlls) {
+          if (-not $foundDlls.ContainsKey($dll)) {
+            Write-Host "Performing broader search for $dll..."
+            $found = Get-ChildItem $currentDir -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "  ✓ Found via broad search: $($found.FullName)"
+              $foundDlls[$dll] = $found.FullName
+            }
+          }
+        }
+        
+        Write-Host "`n=== Search Summary ==="
+        foreach ($dll in $dlls) {
+          if ($foundDlls.ContainsKey($dll)) {
+            Write-Host "✓ $dll : $($foundDlls[$dll])"
+          } else {
+            Write-Host "✗ $dll : NOT FOUND"
+          }
+        }
 
-            Copy-Item $crypto.FullName -Destination $dest -Force
-            Copy-Item $ssl.FullName    -Destination $dest -Force
-            Write-Host "Bundled into $dest"
-    - name: Package Artifacts
-      shell: bash
+    - name: Bundle OpenSSL 1.1 DLLs (Fixed)
+      shell: pwsh
       run: |
-        cd aseprite
-        ARTIFACT_DIR="aseprite-windows-${{ env.BUILD_TYPE }}"
+        $ErrorActionPreference = 'Stop'
         
-        # Copy binaries
-        cp -r build/bin "$ARTIFACT_DIR"
+        # Destination = the already-existing build output folder
+        $dest = "$(Resolve-Path 'aseprite/build/bin')"
+        $currentDir = (Get-Location).Path
         
-        # Create info file
-        cat > "$ARTIFACT_DIR/BUILD_INFO.txt" << EOF
+        # Search paths in the current directory
+        $searchPaths = @(
+          "$currentDir\OpenSSL-Win64\bin",
+          "$currentDir\OpenSSL-Win64", 
+          "$currentDir\OpenSSL\bin",
+          "$currentDir\OpenSSL"
+        )
+        
+        # Add any OpenSSL directories we can find
+        $opensslDirs = Get-ChildItem $currentDir -Recurse -Directory -Name "*OpenSSL*" -ErrorAction SilentlyContinue
+        foreach ($dir in $opensslDirs) {
+          $fullPath = Join-Path $currentDir $dir
+          $searchPaths += $fullPath
+          $searchPaths += Join-Path $fullPath "bin"
+        }
+        
+        # Filter to only existing paths
+        $existingPaths = $searchPaths | Where-Object { Test-Path $_ }
+        
+        Write-Host "Searching in paths: $($existingPaths -join ', ')"
+        
+        $crypto = $null
+        $ssl = $null
+        
+        # Search for the DLLs
+        foreach ($path in $existingPaths) {
+          if (-not $crypto) { 
+            $crypto = Get-ChildItem $path -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 
+          }
+          if (-not $ssl) { 
+            $ssl = Get-ChildItem $path -Recurse -Filter 'libssl-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 
+          }
+          
+          # Break early if we found both
+          if ($crypto -and $ssl) { break }
+        }
+        
+        # If still not found, search the entire current directory tree (last resort)
+        if (-not $crypto) {
+          Write-Host "Performing broad search for libcrypto-1_1-x64.dll..."
+          $crypto = Get-ChildItem $currentDir -Recurse -Filter 'libcrypto-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if (-not $ssl) {
+          Write-Host "Performing broad search for libssl-1_1-x64.dll..."
+          $ssl = Get-ChildItem $currentDir -Recurse -Filter 'libssl-1_1-x64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        
+        # Check if we found everything
+        if (-not $crypto -or -not $ssl) { 
+          Write-Host "ERROR: Could not find required OpenSSL 1.1 DLLs"
+          Write-Host "Crypto DLL: $(if($crypto) { $crypto.FullName } else { 'NOT FOUND' })"
+          Write-Host "SSL DLL: $(if($ssl) { $ssl.FullName } else { 'NOT FOUND' })"
+          
+          # List all DLLs we can find for debugging
+          Write-Host "`nAll DLLs found in current directory:"
+          Get-ChildItem $currentDir -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue | 
+            Where-Object { $_.Name -like "*ssl*" -or $_.Name -like "*crypto*" } |
+            ForEach-Object { Write-Host "  $($_.FullName)" }
+            
+          throw "Could not find OpenSSL 1.1 DLLs"
+        }
+
+        Write-Host "Found DLLs:"
+        Write-Host "  Crypto: $($crypto.FullName)"
+        Write-Host "  SSL: $($ssl.FullName)"
+
+        # Copy the DLLs
+        Copy-Item $crypto.FullName -Destination $dest -Force
+        Copy-Item $ssl.FullName -Destination $dest -Force
+        
+        Write-Host "✓ Successfully bundled OpenSSL DLLs into $dest"
+        
+        # Verify the files were copied
+        $copiedCrypto = Join-Path $dest $crypto.Name
+        $copiedSsl = Join-Path $dest $ssl.Name
+        
+        if ((Test-Path $copiedCrypto) -and (Test-Path $copiedSsl)) {
+          Write-Host "✓ Verification: DLLs successfully copied to destination"
+          Write-Host "  $copiedCrypto"
+          Write-Host "  $copiedSsl"
+        } else {
+          throw "Verification failed: DLLs were not copied successfully"
+        }
+
+    - name: Package Artifacts (Windows zip via PowerShell)
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        
+        Push-Location aseprite
+        $artifactDir = "aseprite-windows-${{ env.BUILD_TYPE }}"
+        
+        if (Test-Path $artifactDir) { Remove-Item $artifactDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $artifactDir | Out-Null
+        
+        Copy-Item -Recurse -Force "build/bin" $artifactDir
+        
+        $buildInfo = @"
         Aseprite Build Information
         ==========================
         Branch: ${{ env.BRANCH }}
         Base Branch: ${{ steps.skia-version.outputs.BASE_BRANCH }}
         Build Type: ${{ env.BUILD_TYPE }}
         Skia Version: ${{ steps.skia-version.outputs.SKIA_TAG }}
-        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Build Date: $(Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
         Commit: $(git rev-parse HEAD)
         
         To run Aseprite:
@@ -302,10 +446,13 @@ jobs:
         
         Note: This is an unofficial build. Consider purchasing Aseprite
         from https://www.aseprite.org/ to support the developers.
-        EOF
+        "@
+        Set-Content -Path (Join-Path $artifactDir "BUILD_INFO.txt") -Value $buildInfo -NoNewline
         
-        # Create ZIP archive (bsdtar supports zip format on Windows)
-        tar -c --format=zip -f aseprite-windows-${{ env.BUILD_TYPE }}.zip "$ARTIFACT_DIR"
+        $zipPath = "aseprite-windows-${{ env.BUILD_TYPE }}.zip"
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Compress-Archive -Path "$artifactDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+        Pop-Location
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
