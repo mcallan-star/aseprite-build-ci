@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to build (main, beta, or specific version)'
+        description: 'Branch or tag to build (e.g. v1.3.17.2, main, beta)'
         required: false
-        default: 'main'
+        default: 'v1.3.17.2'
       build_type:
         description: 'Build type'
         required: false
@@ -23,7 +23,7 @@ on:
           - Debug
 
 env:
-  BRANCH: ${{ github.event.inputs.branch || 'main' }}
+  BRANCH: ${{ github.event.inputs.branch || 'v1.3.17.2' }}
   BUILD_TYPE: ${{ github.event.inputs.build_type || 'RelWithDebInfo' }}
 permissions:
   contents: write
@@ -553,11 +553,92 @@ jobs:
         # Build
         cmake --build "$BUILD_DIR" -- aseprite
 
-    - name: Package and Upload
+    - name: Generate macOS app icons
       run: |
         cd aseprite
-        tar -czf aseprite-macos-${{ env.BUILD_TYPE }}.tar.gz build/bin
-        
+        APP_RES="build/bin/Aseprite.app/Contents/Resources"
+        ICONS_SRC="data/icons"
+
+        # Upstream Aseprite ships .ico + PNGs but no .icns, so the bundle has
+        # no icon by default even though Info.plist references them. Build
+        # the three referenced .icns from the available PNG sizes.
+        make_icns() {
+          local prefix="$1"   # ase | doc | ext
+          local out="$2"      # Aseprite.icns | Document.icns | Extension.icns
+          local iconset
+          iconset="$(mktemp -d)/${out%.icns}.iconset"
+          mkdir -p "$iconset"
+
+          [ -f "$ICONS_SRC/${prefix}16.png"  ] && cp "$ICONS_SRC/${prefix}16.png"  "$iconset/icon_16x16.png"
+          [ -f "$ICONS_SRC/${prefix}32.png"  ] && cp "$ICONS_SRC/${prefix}32.png"  "$iconset/icon_16x16@2x.png"
+          [ -f "$ICONS_SRC/${prefix}32.png"  ] && cp "$ICONS_SRC/${prefix}32.png"  "$iconset/icon_32x32.png"
+          [ -f "$ICONS_SRC/${prefix}64.png"  ] && cp "$ICONS_SRC/${prefix}64.png"  "$iconset/icon_32x32@2x.png"
+          [ -f "$ICONS_SRC/${prefix}128.png" ] && cp "$ICONS_SRC/${prefix}128.png" "$iconset/icon_128x128.png"
+          [ -f "$ICONS_SRC/${prefix}256.png" ] && cp "$ICONS_SRC/${prefix}256.png" "$iconset/icon_128x128@2x.png"
+          [ -f "$ICONS_SRC/${prefix}256.png" ] && cp "$ICONS_SRC/${prefix}256.png" "$iconset/icon_256x256.png"
+
+          iconutil -c icns -o "$APP_RES/$out" "$iconset"
+          echo "Wrote $APP_RES/$out"
+        }
+
+        make_icns ase Aseprite.icns
+        make_icns doc Document.icns
+        make_icns ext Extension.icns
+
+    - name: Package macOS artifact
+      run: |
+        cd aseprite
+        ARTIFACT_DIR="aseprite-macos-${{ env.BUILD_TYPE }}"
+        rm -rf "$ARTIFACT_DIR"
+        mkdir -p "$ARTIFACT_DIR"
+
+        # Ship only the .app bundle. The build/bin/aseprite and build/bin/data
+        # entries are absolute symlinks into the CI runner workspace and are
+        # broken once extracted on any other machine.
+        cp -R build/bin/Aseprite.app "$ARTIFACT_DIR/"
+
+        # Re-sign ad-hoc over the whole bundle so the signature survives the
+        # tar round-trip and stays valid after extraction.
+        codesign --force --deep --sign - "$ARTIFACT_DIR/Aseprite.app"
+
+        # Browsers tag downloads with com.apple.quarantine, and since this
+        # build is not notarized Gatekeeper will refuse to launch it
+        # ("Aseprite is damaged"). Ship a double-clickable helper that
+        # clears the attribute.
+        cat > "$ARTIFACT_DIR/Fix-Quarantine.command" <<'EOF'
+        #!/bin/bash
+        cd "$(dirname "$0")"
+        xattr -dr com.apple.quarantine Aseprite.app && \
+          echo "Quarantine cleared. You can now open Aseprite.app." || \
+          echo "Failed to clear quarantine."
+        EOF
+        chmod +x "$ARTIFACT_DIR/Fix-Quarantine.command"
+
+        cat > "$ARTIFACT_DIR/BUILD_INFO.txt" <<EOF
+        Aseprite Build Information
+        ==========================
+        Branch: ${{ env.BRANCH }}
+        Build Type: ${{ env.BUILD_TYPE }}
+        Skia Version: ${{ steps.skia-version.outputs.SKIA_TAG }}
+        Architecture: ${{ steps.skia-version.outputs.ARCH }}
+        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Commit: $(git rev-parse HEAD)
+
+        To run Aseprite on macOS:
+        1. Extract this archive.
+        2. Double-click Fix-Quarantine.command (or run
+             xattr -dr com.apple.quarantine Aseprite.app
+           in Terminal from this folder).
+        3. Open Aseprite.app.
+
+        Step 2 is required because this build is not notarized by Apple.
+
+        Note: This is an unofficial build. Consider purchasing Aseprite
+        from https://www.aseprite.org/ to support the developers.
+        EOF
+
+        tar -czf "aseprite-macos-${{ env.BUILD_TYPE }}.tar.gz" "$ARTIFACT_DIR"
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
